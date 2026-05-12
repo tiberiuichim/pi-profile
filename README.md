@@ -4,6 +4,10 @@ Profile manager for the [pi coding agent](https://pi.dev). Switch between curate
 
 ## Installation
 
+### From npm _(not yet published)_
+
+Once published, use:
+
 ```bash
 # As a pi extension (auto-discovered, registers /pii command inside pi)
 pi install npm:@tiberiuichim/pi-profile
@@ -12,23 +16,35 @@ pi install npm:@tiberiuichim/pi-profile
 npm install -g @tiberiuichim/pi-profile
 ```
 
-## Usage
+### From git _(works now)_
 
-### CLI
+Install directly from this repo:
 
 ```bash
-pii                       # interactive menu to select a profile
-pii minimal               # launch pi with the "minimal" profile
-pii rpiv --continue       # pass extra args to pi
-pii --help                # list available profiles
+# As a pi extension
+pi install git:github.com/tiberiuichim/pi-profile
 ```
 
-### Inside pi
+### Manual setup
 
-When installed as a pi extension, a `/pii` command is registered:
+```bash
+# Clone the repo
+git clone https://github.com/tiberiuichim/pi-profile.git
 
-```
-/pii                      # interactive menu
+# Install dependencies
+cd pi-profile && npm install
+
+# Run the CLI binary directly
+node bin/pii                  # interactive menu
+node bin/pii minimal          # launch with a specific profile
+node bin/pii --help           # list profiles
+
+# Or use it as a pi extension from the command line
+pi -e ./extensions/index.ts
+
+# Or symlink for convenience
+ln -s $(pwd)/bin/pii ~/.local/bin/pii
+# Now `pii` works from anywhere (add ~/.local/bin to $PATH if needed)
 ```
 
 ## Profile Setup
