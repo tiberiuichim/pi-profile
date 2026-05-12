@@ -1,0 +1,30 @@
+{
+  "name": "@tiberiuichim/pi-profile",
+  "version": "1.0.0",
+  "description": "Profile manager for pi coding agent — switch between curated sets of packages, skills, and extensions",
+  "type": "module",
+  "keywords": ["pi-extension", "pi-package"],
+  "license": "MIT",
+  "repository": "github:tiberiuichim/pi-profile",
+  "files": [
+    "extensions",
+    "bin"
+  ],
+  "bin": {
+    "pii": "./bin/pii"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  }
+}

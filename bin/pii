@@ -1,0 +1,187 @@
+#!/usr/bin/env node
+/**
+ * pii — Launch pi with a selected profile (standalone CLI).
+ *
+ * Reads profile settings from ~/.pi/profiles/<name>/settings.json.
+ *
+ * Usage:
+ *   pii                       # interactive menu
+ *   pii minimal               # launch directly with a profile
+ *   pii --help                # show available profiles
+ */
+
+import { spawn, execSync } from "node:child_process";
+import { mkdirSync, symlinkSync, rmSync, copyFileSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { select } from "@inquirer/prompts";
+
+// ── Config ─────────────────────────────────────────────────────────────────
+
+const homedir = process.env.HOME || "";
+const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir, ".pi", "agent");
+const profilesDir = join(homedir, ".pi", "profiles");
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function loadProfiles() {
+  try {
+    const entries = readdirSync(profilesDir, { withFileTypes: true });
+    const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+    return dirs.map((id) => {
+      let description = id;
+      try {
+        const s = JSON.parse(readFileSync(join(profilesDir, id, "settings.json"), "utf-8"));
+        description = s.pii?.description ?? id;
+      } catch {
+        // fallback
+      }
+      return { id, description };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function showHelp(profiles) {
+  console.log("pii — Launch pi with a selected profile\n");
+  console.log("Usage:");
+  console.log("  pii                       Select a profile via interactive menu");
+  console.log("  pii <profile>             Launch pi directly with a profile");
+  console.log("  pii --help                Show this help\n");
+  console.log("Available profiles:");
+  for (const p of profiles) {
+    console.log(`  ${p.id.padEnd(16)} ${p.description}`);
+  }
+  console.log();
+}
+
+function findPiBin() {
+  const candidates = [
+    process.env.PI_BIN,
+    join(homedir, ".local", "share", "nvm", "v24.14.1", "bin", "pi"),
+  ];
+
+  for (const c of candidates) {
+    if (c) {
+      try {
+        readFileSync(c);
+        return c;
+      } catch {
+        // try next
+      }
+    }
+  }
+
+  try {
+    return execSync("which pi", { encoding: "utf-8" }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function prepareRuntimeDir(profileId) {
+  const runtimeDir = join(tmpdir(), `pii-${profileId}-${randomUUID()}`);
+  mkdirSync(runtimeDir, { recursive: true });
+
+  const profileSettingsPath = join(profilesDir, profileId, "settings.json");
+  copyFileSync(profileSettingsPath, join(runtimeDir, "settings.json"));
+
+  const sharedItems = ["git", "auth.json", "models.json", "sessions", "observability"];
+  for (const item of sharedItems) {
+    const src = join(agentDir, item);
+    const dst = join(runtimeDir, item);
+    try {
+      symlinkSync(src, dst);
+    } catch {
+      // skip
+    }
+  }
+
+  const cleanup = () => {
+    try {
+      rmSync(runtimeDir, { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
+  };
+  process.on("exit", cleanup);
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  return runtimeDir;
+}
+
+function launchPi(runtimeDir, extraArgs) {
+  const piBin = findPiBin();
+  if (!piBin) {
+    console.error("Could not find pi binary. Set PI_BIN in your environment.");
+    process.exit(1);
+  }
+
+  const env = { ...process.env, PI_CODING_AGENT_DIR: runtimeDir };
+
+  const child = spawn(piBin, extraArgs, {
+    env,
+    stdio: "inherit",
+    cwd: process.cwd(),
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) process.exit(code ?? 128 + signal.charCodeAt(0) - 64);
+    process.exit(code ?? 0);
+  });
+
+  child.on("error", (err) => {
+    console.error(`Failed to launch pi: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────
+
+async function main() {
+  const args = process.argv.slice(2);
+
+  if (args.includes("--help") || args.includes("-h")) {
+    const profiles = loadProfiles();
+    showHelp(profiles);
+    process.exit(0);
+  }
+
+  let profile;
+  const extraArgs = [];
+
+  if (args.length > 0 && !args[0].startsWith("-")) {
+    const profiles = loadProfiles();
+    profile = profiles.find((p) => p.id === args[0]);
+    if (!profile) {
+      console.error(`Unknown profile: ${args[0]}`);
+      console.error("Available: " + profiles.map((p) => p.id).join(", "));
+      process.exit(1);
+    }
+    extraArgs.push(...args.slice(1));
+  } else {
+    const profiles = loadProfiles();
+    if (profiles.length === 0) {
+      console.error("No profiles found in", profilesDir);
+      process.exit(1);
+    }
+
+    const id = await select({
+      message: "Select profile",
+      choices: profiles.map((p) => ({
+        value: p.id,
+        name: `${p.id.padEnd(16)} ${p.description}`,
+      })),
+    });
+
+    profile = profiles.find((p) => p.id === id);
+  }
+
+  const runtimeDir = prepareRuntimeDir(profile.id);
+  launchPi(runtimeDir, extraArgs);
+}
+
+main();
