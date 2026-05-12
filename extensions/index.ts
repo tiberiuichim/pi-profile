@@ -9,7 +9,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, execSync } from "node:child_process";
-import { mkdirSync, symlinkSync, rmSync, copyFileSync, readFileSync, readdirSync, accessSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, rmSync, copyFileSync, readFileSync, readdirSync, accessSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -25,20 +25,22 @@ function loadProfiles() {
     const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
     return dirs.map((id) => {
       let description = id;
+      let flags: string[] = [];
       try {
         const s = JSON.parse(readFileSync(join(profilesDir, id, "settings.json"), "utf-8"));
         description = s.pii?.description ?? id;
+        flags = s.pii?.flags ?? [];
       } catch {
         // fallback
       }
-      return { id, description };
+      return { id, description, flags };
     });
   } catch {
     return [];
   }
 }
 
-function findPiBin() {
+function findPiBin(): string | null {
   const candidates = [
     process.env.PI_BIN,
     join(homedir, ".local", "share", "nvm", "v24.14.1", "bin", "pi"),
@@ -81,18 +83,29 @@ function prepareRuntimeDir(profileId: string): string {
     }
   }
 
-  const cleanup = () => {
-    try {
-      rmSync(runtimeDir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  };
-  process.on("exit", cleanup);
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
-
   return runtimeDir;
+}
+
+function hideAgentsSkills(): boolean {
+  const dir = join(homedir, ".agents", "skills");
+  const bak = dir + ".hidden";
+  try {
+    accessSync(dir);
+    renameSync(dir, bak);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function restoreAgentsSkills() {
+  const dir = join(homedir, ".agents", "skills");
+  const bak = dir + ".hidden";
+  try {
+    renameSync(bak, dir);
+  } catch {
+    // already restored or doesn't exist
+  }
 }
 
 // ── Extension ──────────────────────────────────────────────────────────────
@@ -129,19 +142,47 @@ export default function (pi: ExtensionAPI) {
       }
 
       const env = { ...process.env, PI_CODING_AGENT_DIR: runtimeDir };
+      const allArgs = [...profile.flags];
 
-      const child = spawn(piBin, [], {
+      // Hide ~/.agents/skills/ if --no-skills is in the flags.
+      // ~/.agents/skills/ is auto-discovered by pi regardless of --no-skills,
+      // so we rename it temporarily. Adjust --skill paths to point at the hidden location.
+      const hideSkills = allArgs.includes("--no-skills");
+      const agentsSkillsAbs = join(homedir, ".agents", "skills");
+      const agentsSkillsTilde = "~/.agents/skills";
+      const agentsSkillsHidden = agentsSkillsAbs + ".hidden";
+      let hidden = false;
+      if (hideSkills) {
+        hidden = hideAgentsSkills();
+        for (let i = 0; i < allArgs.length; i++) {
+          if (allArgs[i] === "--skill" && i + 1 < allArgs.length) {
+            const p = allArgs[i + 1];
+            if (p === agentsSkillsAbs || p.startsWith(agentsSkillsAbs + "/") ||
+                p === agentsSkillsTilde || p.startsWith(agentsSkillsTilde + "/")) {
+              allArgs[i + 1] = p.replace(agentsSkillsAbs, agentsSkillsHidden).replace(agentsSkillsTilde, agentsSkillsHidden);
+            }
+          }
+        }
+      }
+
+      const child = spawn(piBin, allArgs, {
         env,
         stdio: "inherit",
         cwd: process.cwd(),
       });
 
+      const onExit = () => {
+        if (hidden) restoreAgentsSkills();
+      };
+
       child.on("exit", (code, signal) => {
+        onExit();
         if (signal) process.exit(code ?? 128 + signal.charCodeAt(0) - 64);
         process.exit(code ?? 0);
       });
 
       child.on("error", (err) => {
+        onExit();
         ctx.ui.notify(`Failed to launch pi: ${err.message}`, "error");
       });
     },

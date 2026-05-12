@@ -11,7 +11,7 @@
  */
 
 import { spawn, execSync } from "node:child_process";
-import { mkdirSync, symlinkSync, rmSync, copyFileSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, rmSync, copyFileSync, readdirSync, readFileSync, renameSync, accessSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -31,13 +31,15 @@ function loadProfiles() {
     const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
     return dirs.map((id) => {
       let description = id;
+      let flags = [];
       try {
         const s = JSON.parse(readFileSync(join(profilesDir, id, "settings.json"), "utf-8"));
         description = s.pii?.description ?? id;
+        flags = s.pii?.flags ?? [];
       } catch {
         // fallback
       }
-      return { id, description };
+      return { id, description, flags };
     });
   } catch {
     return [];
@@ -99,21 +101,34 @@ function prepareRuntimeDir(profileId) {
     }
   }
 
-  const cleanup = () => {
-    try {
-      rmSync(runtimeDir, { recursive: true, force: true });
-    } catch {
-      // best effort
-    }
-  };
-  process.on("exit", cleanup);
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
-
   return runtimeDir;
 }
 
-function launchPi(runtimeDir, extraArgs) {
+function hideAgentsSkills() {
+  // ~/.agents/skills/ is auto-discovered by pi regardless of --no-skills.
+  // Temporarily rename it to prevent leakage into profiles that don't want it.
+  const dir = join(homedir, ".agents", "skills");
+  const bak = dir + ".hidden";
+  try {
+    accessSync(dir);
+    renameSync(dir, bak);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function restoreAgentsSkills() {
+  const dir = join(homedir, ".agents", "skills");
+  const bak = dir + ".hidden";
+  try {
+    renameSync(bak, dir);
+  } catch {
+    // already restored or doesn't exist
+  }
+}
+
+function launchPi(runtimeDir, allArgs) {
   const piBin = findPiBin();
   if (!piBin) {
     console.error("Could not find pi binary. Set PI_BIN in your environment.");
@@ -122,18 +137,46 @@ function launchPi(runtimeDir, extraArgs) {
 
   const env = { ...process.env, PI_CODING_AGENT_DIR: runtimeDir };
 
-  const child = spawn(piBin, extraArgs, {
+  // Hide ~/.agents/skills/ if --no-skills is in the args.
+  // ~/.agents/skills/ is auto-discovered by pi regardless of --no-skills,
+  // so we rename it temporarily. Adjust --skill paths to point at the hidden location.
+  const hideSkills = allArgs.includes("--no-skills");
+  let hidden = false;
+  const agentsSkillsAbs = join(homedir, ".agents", "skills");
+  const agentsSkillsTilde = "~/.agents/skills";
+  const agentsSkillsHidden = agentsSkillsAbs + ".hidden";
+  if (hideSkills) {
+    hidden = hideAgentsSkills();
+    // Fix --skill paths that point into ~/.agents/skills/ (both ~ and absolute forms)
+    for (let i = 0; i < allArgs.length; i++) {
+      if (allArgs[i] === "--skill" && i + 1 < allArgs.length) {
+        const p = allArgs[i + 1];
+        if (p === agentsSkillsAbs || p.startsWith(agentsSkillsAbs + "/") ||
+            p === agentsSkillsTilde || p.startsWith(agentsSkillsTilde + "/")) {
+          allArgs[i + 1] = p.replace(agentsSkillsAbs, agentsSkillsHidden).replace(agentsSkillsTilde, agentsSkillsHidden);
+        }
+      }
+    }
+  }
+
+  const child = spawn(piBin, allArgs, {
     env,
     stdio: "inherit",
     cwd: process.cwd(),
   });
 
+  const onExit = () => {
+    if (hidden) restoreAgentsSkills();
+  };
+
   child.on("exit", (code, signal) => {
+    onExit();
     if (signal) process.exit(code ?? 128 + signal.charCodeAt(0) - 64);
     process.exit(code ?? 0);
   });
 
   child.on("error", (err) => {
+    onExit();
     console.error(`Failed to launch pi: ${err.message}`);
     process.exit(1);
   });
@@ -181,7 +224,8 @@ async function main() {
   }
 
   const runtimeDir = prepareRuntimeDir(profile.id);
-  launchPi(runtimeDir, extraArgs);
+  const allArgs = [...profile.flags, ...extraArgs];
+  launchPi(runtimeDir, allArgs);
 }
 
 main();
