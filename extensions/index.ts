@@ -86,25 +86,46 @@ function prepareRuntimeDir(profileId: string): string {
   return runtimeDir;
 }
 
-function hideAgentsSkills(): boolean {
-  const dir = join(homedir, ".agents", "skills");
-  const bak = dir + ".hidden";
-  try {
-    accessSync(dir);
-    renameSync(dir, bak);
-    return true;
-  } catch {
-    return false;
+const skillDirs = [
+  join(homedir, ".agents", "skills"),
+  join(homedir, ".config", "agents", "skills"),
+];
+
+function hideSkillDirs(): string[] {
+  const hidden: string[] = [];
+  for (const dir of skillDirs) {
+    try {
+      accessSync(dir);
+      renameSync(dir, dir + ".pii-hidden");
+      hidden.push(dir);
+    } catch {
+      // doesn't exist
+    }
+  }
+  return hidden;
+}
+
+function restoreSkillDirs(hidden: string[]) {
+  for (const dir of hidden) {
+    try {
+      renameSync(dir + ".pii-hidden", dir);
+    } catch {
+      // already restored
+    }
   }
 }
 
-function restoreAgentsSkills() {
-  const dir = join(homedir, ".agents", "skills");
-  const bak = dir + ".hidden";
-  try {
-    renameSync(bak, dir);
-  } catch {
-    // already restored or doesn't exist
+function remapSkillPaths(args: string[], hiddenDirs: string[]) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--skill" && i + 1 < args.length) {
+      for (const orig of hiddenDirs) {
+        const hidden = orig + ".pii-hidden";
+        if (args[i + 1] === orig || args[i + 1].startsWith(orig + "/")) {
+          args[i + 1] = hidden + args[i + 1].slice(orig.length);
+          break;
+        }
+      }
+    }
   }
 }
 
@@ -144,25 +165,15 @@ export default function (pi: ExtensionAPI) {
       const env = { ...process.env, PI_CODING_AGENT_DIR: runtimeDir };
       const allArgs = [...profile.flags];
 
-      // Hide ~/.agents/skills/ if --no-skills is in the flags.
-      // ~/.agents/skills/ is auto-discovered by pi regardless of --no-skills,
-      // so we rename it temporarily. Adjust --skill paths to point at the hidden location.
-      const hideSkills = allArgs.includes("--no-skills");
-      const agentsSkillsAbs = join(homedir, ".agents", "skills");
-      const agentsSkillsTilde = "~/.agents/skills";
-      const agentsSkillsHidden = agentsSkillsAbs + ".hidden";
-      let hidden = false;
-      if (hideSkills) {
-        hidden = hideAgentsSkills();
-        for (let i = 0; i < allArgs.length; i++) {
-          if (allArgs[i] === "--skill" && i + 1 < allArgs.length) {
-            const p = allArgs[i + 1];
-            if (p === agentsSkillsAbs || p.startsWith(agentsSkillsAbs + "/") ||
-                p === agentsSkillsTilde || p.startsWith(agentsSkillsTilde + "/")) {
-              allArgs[i + 1] = p.replace(agentsSkillsAbs, agentsSkillsHidden).replace(agentsSkillsTilde, agentsSkillsHidden);
-            }
-          }
-        }
+      const hideUserSkills = allArgs.includes("--hide-user-skills");
+      if (hideUserSkills) {
+        const idx = allArgs.indexOf("--hide-user-skills");
+        allArgs.splice(idx, 1);
+      }
+      let hiddenDirs: string[] = [];
+      if (allArgs.includes("--no-skills") || hideUserSkills) {
+        hiddenDirs = hideSkillDirs();
+        remapSkillPaths(allArgs, hiddenDirs);
       }
 
       const child = spawn(piBin, allArgs, {
@@ -172,7 +183,7 @@ export default function (pi: ExtensionAPI) {
       });
 
       const onExit = () => {
-        if (hidden) restoreAgentsSkills();
+        if (hiddenDirs.length > 0) restoreSkillDirs(hiddenDirs);
       };
 
       child.on("exit", (code, signal) => {
