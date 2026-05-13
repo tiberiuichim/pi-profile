@@ -9,7 +9,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn, execSync } from "node:child_process";
-import { mkdirSync, symlinkSync, rmSync, copyFileSync, readFileSync, readdirSync, accessSync, renameSync } from "node:fs";
+import { mkdirSync, symlinkSync, rmSync, copyFileSync, readFileSync, readdirSync, accessSync, renameSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -105,12 +105,48 @@ function hideSkillDirs(): string[] {
   return hidden;
 }
 
-function restoreSkillDirs(hidden: string[]) {
+function copyDirRecursive(src: string, dst: string): void {
+  mkdirSync(dst, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const srcPath = join(src, entry.name);
+    const dstPath = join(dst, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, dstPath);
+    } else {
+      try {
+        copyFileSync(srcPath, dstPath);
+      } catch {
+        // skip individual file failures
+      }
+    }
+  }
+}
+
+function restoreSkillDirs(hidden: string[]): void {
   for (const dir of hidden) {
+    const hiddenPath = dir + ".pii-hidden";
+    if (!existsSync(hiddenPath)) {
+      continue;
+    }
     try {
-      renameSync(dir + ".pii-hidden", dir);
+      if (!existsSync(dir)) {
+        renameSync(hiddenPath, dir);
+        continue;
+      }
+      try {
+        const entries = readdirSync(hiddenPath, { withFileTypes: true });
+        if (entries.length === 0) {
+          rmSync(hiddenPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        rmSync(hiddenPath, { recursive: true, force: true });
+        continue;
+      }
+      copyDirRecursive(hiddenPath, dir);
+      rmSync(hiddenPath, { recursive: true, force: true });
     } catch {
-      // already restored
+      // restore failed — .pii-hidden left behind for manual cleanup
     }
   }
 }
@@ -182,7 +218,10 @@ export default function (pi: ExtensionAPI) {
         cwd: process.cwd(),
       });
 
+      let exited = false;
       const onExit = () => {
+        if (exited) return;
+        exited = true;
         if (hiddenDirs.length > 0) restoreSkillDirs(hiddenDirs);
       };
 
@@ -196,6 +235,10 @@ export default function (pi: ExtensionAPI) {
         onExit();
         ctx.ui.notify(`Failed to launch pi: ${err.message}`, "error");
       });
+
+      process.on("SIGINT", () => { onExit(); process.exit(130); });
+      process.on("SIGTERM", () => { onExit(); process.exit(143); });
+      process.on("SIGHUP", () => { onExit(); process.exit(129); });
     },
   });
 }

@@ -11,7 +11,7 @@
  */
 
 import { spawn, execSync } from "node:child_process";
-import { mkdirSync, symlinkSync, rmSync, copyFileSync, readdirSync, readFileSync, renameSync, accessSync } from "node:fs";
+import { mkdirSync, symlinkSync, rmSync, copyFileSync, readdirSync, readFileSync, renameSync, accessSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -126,12 +126,50 @@ function hideSkillDirs() {
   return hidden;
 }
 
+function copyDirRecursive(src, dst) {
+  mkdirSync(dst, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const srcPath = join(src, entry.name);
+    const dstPath = join(dst, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, dstPath);
+    } else {
+      try {
+        copyFileSync(srcPath, dstPath);
+      } catch (e) {
+        process.stderr.write(`[pii] warn: failed to copy ${srcPath}: ${e.message}\n`);
+      }
+    }
+  }
+}
+
 function restoreSkillDirs(hidden) {
   for (const dir of hidden) {
+    const hiddenPath = dir + ".pii-hidden";
+    if (!existsSync(hiddenPath)) {
+      continue; // already cleaned up
+    }
     try {
-      renameSync(dir + ".pii-hidden", dir);
-    } catch {
-      // already restored
+      // Fast path: destination doesn't exist, just rename back.
+      if (!existsSync(dir)) {
+        renameSync(hiddenPath, dir);
+        continue;
+      }
+      // Destination exists — merge contents from .pii-hidden into it.
+      try {
+        const entries = readdirSync(hiddenPath, { withFileTypes: true });
+        if (entries.length === 0) {
+          rmSync(hiddenPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        rmSync(hiddenPath, { recursive: true, force: true });
+        continue;
+      }
+      copyDirRecursive(hiddenPath, dir);
+      rmSync(hiddenPath, { recursive: true, force: true });
+    } catch (e) {
+      process.stderr.write(`[pii] error: failed to restore ${dir}: ${e.message}\n`);
     }
   }
 }
@@ -181,7 +219,10 @@ function launchPi(runtimeDir, allArgs) {
     cwd: process.cwd(),
   });
 
+  let exited = false;
   const onExit = () => {
+    if (exited) return;
+    exited = true;
     if (hiddenDirs.length > 0) restoreSkillDirs(hiddenDirs);
   };
 
@@ -196,6 +237,11 @@ function launchPi(runtimeDir, allArgs) {
     console.error(`Failed to launch pi: ${err.message}`);
     process.exit(1);
   });
+
+  // Restore on unexpected termination (SIGINT, SIGTERM, SIGHUP).
+  process.on("SIGINT", () => { onExit(); process.exit(130); });
+  process.on("SIGTERM", () => { onExit(); process.exit(143); });
+  process.on("SIGHUP", () => { onExit(); process.exit(129); });
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
