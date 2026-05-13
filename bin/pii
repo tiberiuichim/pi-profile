@@ -11,17 +11,17 @@
  */
 
 import { spawn, execSync } from "node:child_process";
-import { mkdirSync, symlinkSync, rmSync, copyFileSync, readdirSync, readFileSync, renameSync, accessSync, existsSync } from "node:fs";
+import { mkdirSync, symlinkSync, copyFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { select } from "@inquirer/prompts";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
-const homedir = process.env.HOME || "";
-const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir, ".pi", "agent");
-const profilesDir = join(homedir, ".pi", "profiles");
+const home = homedir();
+const agentDir = process.env.PI_CODING_AGENT_DIR || join(home, ".pi", "agent");
+const profilesDir = join(home, ".pi", "profiles");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ function showHelp(profiles) {
 function findPiBin() {
   const candidates = [
     process.env.PI_BIN,
-    join(homedir, ".local", "share", "nvm", "v24.14.1", "bin", "pi"),
+    join(home, ".local", "share", "nvm", "v24.14.1", "bin", "pi"),
   ];
 
   for (const c of candidates) {
@@ -104,93 +104,6 @@ function prepareRuntimeDir(profileId) {
   return runtimeDir;
 }
 
-// ~/.agents/skills/ and ~/.config/agents/skills/ are auto-discovered by pi
-// regardless of --no-skills when PI_CODING_AGENT_DIR is a temp dir.
-// We rename them temporarily and remap --skill paths.
-const skillDirs = [
-  join(homedir, ".agents", "skills"),
-  join(homedir, ".config", "agents", "skills"),
-];
-
-function hideSkillDirs() {
-  const hidden = [];
-  for (const dir of skillDirs) {
-    try {
-      accessSync(dir);
-      renameSync(dir, dir + ".pii-hidden");
-      hidden.push(dir);
-    } catch {
-      // doesn't exist
-    }
-  }
-  return hidden;
-}
-
-function copyDirRecursive(src, dst) {
-  mkdirSync(dst, { recursive: true });
-  for (const entry of readdirSync(src, { withFileTypes: true })) {
-    const srcPath = join(src, entry.name);
-    const dstPath = join(dst, entry.name);
-    if (entry.isDirectory()) {
-      copyDirRecursive(srcPath, dstPath);
-    } else {
-      try {
-        copyFileSync(srcPath, dstPath);
-      } catch (e) {
-        process.stderr.write(`[pii] warn: failed to copy ${srcPath}: ${e.message}\n`);
-      }
-    }
-  }
-}
-
-function restoreSkillDirs(hidden) {
-  for (const dir of hidden) {
-    const hiddenPath = dir + ".pii-hidden";
-    if (!existsSync(hiddenPath)) {
-      continue; // already cleaned up
-    }
-    try {
-      // Fast path: destination doesn't exist, just rename back.
-      if (!existsSync(dir)) {
-        renameSync(hiddenPath, dir);
-        continue;
-      }
-      // Destination exists — merge contents from .pii-hidden into it.
-      try {
-        const entries = readdirSync(hiddenPath, { withFileTypes: true });
-        if (entries.length === 0) {
-          rmSync(hiddenPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        rmSync(hiddenPath, { recursive: true, force: true });
-        continue;
-      }
-      copyDirRecursive(hiddenPath, dir);
-      rmSync(hiddenPath, { recursive: true, force: true });
-    } catch (e) {
-      process.stderr.write(`[pii] error: failed to restore ${dir}: ${e.message}\n`);
-    }
-  }
-}
-
-function remapSkillPaths(args, hiddenDirs) {
-  const hiddenMap = new Map();
-  for (const dir of hiddenDirs) {
-    hiddenMap.set(dir, dir + ".pii-hidden");
-  }
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--skill" && i + 1 < args.length) {
-      for (const [orig, hidden] of hiddenMap) {
-        if (args[i + 1] === orig || args[i + 1].startsWith(orig + "/")) {
-          args[i + 1] = hidden + args[i + 1].slice(orig.length);
-          break;
-        }
-      }
-    }
-  }
-}
-
 function launchPi(runtimeDir, allArgs) {
   const piBin = findPiBin();
   if (!piBin) {
@@ -200,48 +113,26 @@ function launchPi(runtimeDir, allArgs) {
 
   const env = { ...process.env, PI_CODING_AGENT_DIR: runtimeDir };
 
-  // Hide ~/.agents/skills/ and ~/.config/agents/skills/ if --no-skills or --hide-user-skills.
-  // --hide-user-skills is our own flag — strip it before passing to pi.
-  const hideUserSkills = allArgs.includes("--hide-user-skills");
-  if (hideUserSkills) {
-    const idx = allArgs.indexOf("--hide-user-skills");
-    allArgs.splice(idx, 1);
-  }
-  let hiddenDirs = [];
-  if (allArgs.includes("--no-skills") || hideUserSkills) {
-    hiddenDirs = hideSkillDirs();
-    remapSkillPaths(allArgs, hiddenDirs);
-  }
-
   const child = spawn(piBin, allArgs, {
     env,
     stdio: "inherit",
     cwd: process.cwd(),
   });
 
-  let exited = false;
-  const onExit = () => {
-    if (exited) return;
-    exited = true;
-    if (hiddenDirs.length > 0) restoreSkillDirs(hiddenDirs);
-  };
-
   child.on("exit", (code, signal) => {
-    onExit();
     if (signal) process.exit(code ?? 128 + signal.charCodeAt(0) - 64);
     process.exit(code ?? 0);
   });
 
   child.on("error", (err) => {
-    onExit();
     console.error(`Failed to launch pi: ${err.message}`);
     process.exit(1);
   });
 
-  // Restore on unexpected termination (SIGINT, SIGTERM, SIGHUP).
-  process.on("SIGINT", () => { onExit(); process.exit(130); });
-  process.on("SIGTERM", () => { onExit(); process.exit(143); });
-  process.on("SIGHUP", () => { onExit(); process.exit(129); });
+  // Forward termination signals to the child.
+  process.on("SIGINT", () => { child.kill("SIGINT"); });
+  process.on("SIGTERM", () => { child.kill("SIGTERM"); });
+  process.on("SIGHUP", () => { child.kill("SIGHUP"); });
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────

@@ -51,22 +51,7 @@ tmpdir/pii-<profileId>-<uuid>/
 
 ## Skill Management
 
-This is the most involved part of pii. Pi auto-discovers skills from two locations regardless of `--no-skills`:
-
-- `~/.agents/skills/`
-- `~/.config/agents/skills/`
-
-When a profile uses `--no-skills` or `--hide-user-skills`, pii must prevent these directories from being picked up. It does this through a **rename-hide / restore** cycle:
-
-### Hide Phase (before spawning pi)
-
-1. For each known skill directory, check if it exists via `accessSync`
-2. If it exists, rename it to `<path>.pii-hidden` (e.g., `~/.agents/skills/` → `~/.agents/skills.pii-hidden`)
-3. Track which directories were hidden
-
-### Path Remapping
-
-If the profile passes `--skill <path>` arguments that reference a hidden directory, those paths are remapped to point at the `.pii-hidden` location. This lets profiles selectively opt-in to specific skills while hiding the rest:
+Pi's `--no-skills` flag is sufficient on its own to suppress skill discovery. The flag prevents auto-discovered skill paths (from `~/.agents/skills` and `.agents/skills` in ancestor directories) from being loaded, regardless of `PI_CODING_AGENT_DIR`. Profiles can still opt into specific skills via `--skill <path>`:
 
 ```json
 {
@@ -80,28 +65,7 @@ If the profile passes `--skill <path>` arguments that reference a hidden directo
 }
 ```
 
-### Restore Phase (when pi exits)
-
-The restore has two paths:
-
-1. **Fast path** — if the destination directory doesn't exist, `renameSync` the `.pii-hidden` directory back. This is the common case.
-2. **Merge path** — if the destination directory was recreated during the session (e.g., by another process), contents from `.pii-hidden` are recursively copied into it, then `.pii-hidden` is removed. This prevents data loss if something created the directory while pi was running.
-
-### Cleanup on Unexpected Exit
-
-Signal handlers for `SIGINT`, `SIGTERM`, and `SIGHUP` ensure the restore runs even when:
-
-- The user presses Ctrl+C
-- The terminal closes (SIGHUP)
-- A process manager sends SIGTERM
-
-An `exited` guard flag prevents double-restore if multiple events fire (e.g., SIGINT followed by the child's exit event).
-
-### Error Handling
-
-- **Hide phase**: silently skips directories that don't exist
-- **Restore phase**: logs errors to stderr with `[pii] error:` prefix instead of silently swallowing them
-- **Individual file copy failures** during merge: logged as `[pii] warn:` but don't abort the restore
+No rename-hide/restore cycle is needed — pi's built-in `--no-skills` handles everything.
 
 ## Extension API
 

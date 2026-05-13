@@ -85,7 +85,9 @@ On each launch, `pii` creates a temporary runtime directory with:
 - Symlinks to shared state (git packages, auth, models, sessions)
 - `PI_CODING_AGENT_DIR` pointing to the temp dir
 
-The temp dir is cleaned up when pi exits. Sessions are shared across profiles.
+The temp dir is left for the OS to clean up. Sessions are shared across profiles.
+
+Profiles can use `--no-skills` to disable all skill discovery, and selectively re-enable specific ones with `--skill <path>`. Pi's built-in `--no-skills` flag handles this without any filesystem manipulation.
 
 ## Sharing with Your Team
 
